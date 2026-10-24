@@ -8,10 +8,13 @@
 #   token      paste a fine-grained PAT (noamross/cheznoam, contents: read)
 # The token stays in this process: never in a URL, .git/config, credential store or history.
 #
-# Env (all optional): CHEZNOAM_AUTH=existing|browser|token, CHEZNOAM_TOKEN, CHEZNOAM_ROLE,
-# CHEZNOAM_SPARSE=true (check out only home/ and .chezmoiroot, e.g. on the CDC VAP; default: full clone),
-# plus the init settings read by .chezmoi.toml.tmpl (CHEZNOAM_CONTEXT, CHEZNOAM_NO_SUDO, ...).
-# Test overrides: CHEZNOAM_REPO, CHEZNOAM_GITHUB, CHEZNOAM_CLIENT_ID.
+# Then it asks for the machine profile (home/.chezmoidata/profiles.yaml: role and settings such as
+# the CDC VAP's), suggesting one from the hostname, and for a sparse or full clone.
+#
+# Env (all optional): CHEZNOAM_AUTH=existing|browser|token, CHEZNOAM_TOKEN, CHEZNOAM_PROFILE,
+# CHEZNOAM_CLONE=sparse|full, plus init settings that override the profile (CHEZNOAM_CONTEXT, ...).
+# Without a terminal: the stored or hostname-matched profile, and the profile's clone type.
+# Test overrides: CHEZNOAM_REPO, CHEZNOAM_GITHUB, CHEZNOAM_CLIENT_ID, CHEZNOAM_HOSTNAME.
 set -eu
 
 repo=${CHEZNOAM_REPO:-https://github.com/noamross/cheznoam.git}
@@ -29,7 +32,9 @@ cz_sum_linux_arm64=c9e6a6e71eb5291018e161a8426d7c313cd2e8553c2ca4029511fec2a33bc
 say() { printf '%s\n' "$*" >&2; }
 die() { say "setup: $*"; exit 1; }
 # Prompts read the terminal: under `curl | sh`, stdin is this script
-ask() { [ -r /dev/tty ] || die "no terminal to ask: $1 (set it in the environment)"; printf '%s' "$1" >/dev/tty; read -r REPLY </dev/tty; }
+# A terminal is usable only if it opens (the device node exists even with no controlling terminal)
+tty() { (: </dev/tty) 2>/dev/null; }
+ask() { tty || die "no terminal to ask: $1 (set it in the environment)"; printf '%s' "$1" >/dev/tty; read -r REPLY </dev/tty; }
 need() { command -v "$1" >/dev/null 2>&1 || die "needs $1"; }
 need git
 need curl
@@ -62,7 +67,7 @@ existing) ;;
 token)
   token=${CHEZNOAM_TOKEN:-}
   if [ -z "$token" ]; then
-    [ -r /dev/tty ] || die "no terminal to ask for a token (set CHEZNOAM_TOKEN)"
+    tty || die "no terminal to ask for a token (set CHEZNOAM_TOKEN)"
     printf 'Token (fine-grained, noamross/cheznoam contents:read; input hidden): ' >/dev/tty
     stty -echo </dev/tty; read -r token </dev/tty || true; stty echo </dev/tty; echo >/dev/tty
   fi
@@ -101,22 +106,66 @@ export CHEZNOAM_GIT_TOKEN
 unset CHEZNOAM_TOKEN token
 g() { if [ "$mode" = existing ]; then git "$@"; else tgit "$@"; fi; }
 
-# 3. Source: full clone to edit and push from; sparse (home/ and .chezmoiroot only, no docs or
-# tests downloaded) with CHEZNOAM_SPARSE=true. Undo later: git -C ~/.local/share/chezmoi sparse-checkout disable
+# 3. Source. A first run clones shallow and blobless without checkout, reads the profiles, then:
+# sparse: checks out only home/ and .chezmoiroot (docs and tests never downloaded); full: re-clones
+# normally, to edit and push. Sparse to full later:
+#   git -C ~/.local/share/chezmoi fetch --unshallow && git -C ~/.local/share/chezmoi sparse-checkout disable
+fresh=
 if [ -d "$src/.git" ]; then
   g -C "$src" pull -q --ff-only || die "update of $src failed"
 else
   [ ! -e "$src" ] || [ -z "$(ls -A "$src")" ] || die "$src exists and is not a git clone"
-  case ${CHEZNOAM_SPARSE:-} in true | 1 | yes) sparse=1 ;; *) sparse= ;; esac
-  if ! g clone -q --no-checkout ${sparse:+--filter=blob:none} "$repo" "$src"; then
-    rm -rf "$src"; die "clone failed (wrong or expired token?)"
+  g clone -q --no-checkout --depth 1 --filter=blob:none "$repo" "$src" || { rm -rf "$src"; die "clone failed (wrong or expired token?)"; }
+  fresh=1
+fi
+undo() { [ -z "$fresh" ] || rm -rf "$src"; die "$1"; }
+
+# 4. Machine profile. Lines: name clone host...
+profiles=$(g -C "$src" show HEAD:home/.chezmoidata/profiles.yaml | awk '
+  /^  [a-z0-9-]+:$/ { n = substr($1, 1, length($1) - 1); names[++k] = n; clone[n] = "sparse"; hosts[n] = "" }
+  /^    clone:/ { clone[n] = $2 }
+  /^    hosts:/ { h = $0; sub(/.*\[/, "", h); sub(/\].*/, "", h); gsub(/[ ,]+/, " ", h); hosts[n] = tolower(h) }
+  END { for (i = 1; i <= k; i++) print names[i], clone[names[i]], hosts[names[i]] }') || undo "cannot read profiles"
+names=$(echo "$profiles" | cut -d' ' -f1 | tr '\n' ' ')
+host=$(echo "${CHEZNOAM_HOSTNAME:-$(hostname 2>/dev/null || uname -n)}" | cut -d. -f1 | tr A-Z a-z)
+stored=$(sed -n 's/^ *profile = "\(.*\)"$/\1/p' "$HOME/.config/chezmoi/chezmoi.toml" 2>/dev/null || true)
+guess=$(echo "$profiles" | awk -v h="$host" '{ for (i = 3; i <= NF; i++) if ($i == h) { print $1; exit } }')
+profile=${CHEZNOAM_PROFILE:-$stored}
+if [ -n "$profile" ]; then
+  say "Profile: $profile${stored:+ (stored)}"
+elif tty; then
+  if [ -n "$guess" ]; then
+    ask "Profile [$names] (Enter for $guess, matches host $host): "; profile=${REPLY:-$guess}
+  else
+    ask "Profile [$names] (no match for host $host): "; profile=$REPLY
   fi
-  [ -z "$sparse" ] || git -C "$src" sparse-checkout set --no-cone '/.chezmoiroot' '/home/'
-  g -C "$src" checkout -q || { rm -rf "$src"; die "checkout failed"; }
+else
+  profile=$guess
+  [ -n "$profile" ] || undo "no profile matches host $host; set CHEZNOAM_PROFILE to one of: $names"
+  say "Profile: $profile (matches host $host)"
+fi
+case " $names" in *" $profile "*) ;; *) undo "unknown profile '$profile'; known: $names" ;; esac
+
+# 5. Clone type (first run only)
+if [ -n "$fresh" ]; then
+  def=$(echo "$profiles" | awk -v p="$profile" '$1 == p { print $2 }')
+  clone=${CHEZNOAM_CLONE:-}
+  if [ -z "$clone" ] && tty; then
+    ask "Clone: sparse (only what's needed to apply) or full (history, docs, tests; to edit and push) [Enter for $def]: "
+    clone=${REPLY:-$def}
+  fi
+  clone=${clone:-$def}
+  case $clone in
+  s*) git -C "$src" sparse-checkout set --no-cone '/.chezmoiroot' '/home/'
+      g -C "$src" checkout -q || undo "checkout failed" ;;
+  f*) rm -rf "$src"
+      g clone -q "$repo" "$src" || undo "full clone failed" ;;
+  *) undo "clone must be sparse or full" ;;
+  esac
 fi
 unset CHEZNOAM_GIT_TOKEN
 
-# 4. chezmoi, pinned and checksummed
+# 6. chezmoi, pinned and checksummed
 cz=$bin/chezmoi
 if [ "$("$cz" --version 2>/dev/null | cut -d, -f1)" != "chezmoi version v$cz_ver" ]; then
   os=$(uname -s | tr A-Z a-z)
@@ -135,10 +184,6 @@ if [ "$("$cz" --version 2>/dev/null | cut -d, -f1)" != "chezmoi version v$cz_ver
   fi
 fi
 
-# 5. Apply
-role=${CHEZNOAM_ROLE:-}
-if [ -z "$role" ] && [ ! -f "$HOME/.config/chezmoi/chezmoi.toml" ]; then
-  ask "Role [mac-workstation, chromebook-container, linux-workstation-ssh, server, minimal-shell]: "; role=$REPLY
-fi
-"$cz" init --apply --no-tty ${role:+--promptChoice "role=$role"}
+# 7. Apply
+CHEZNOAM_PROFILE=$profile "$cz" init --apply --no-tty
 say "Done. Open a new shell. Re-run this script to update."

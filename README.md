@@ -6,7 +6,7 @@ Bootstrap for Noam's dotfiles (private repo `noamross/cheznoam`, managed with ch
 curl -fsSL https://raw.githubusercontent.com/noamross/setup/main/setup.sh | sh
 ```
 
-It uses existing GitHub credentials if git already has them. Otherwise it asks to sign in through the browser (GitHub device code, via a GitHub App limited to read access on that one repo, tokens valid 8 hours) or to paste a fine-grained token. The token is never written to disk. Then it clones the repo to `~/.local/share/chezmoi`, installs a pinned, checksummed chezmoi, and applies.
+It uses existing GitHub credentials if git already has them. Otherwise it asks to sign in through the browser (GitHub device code, via a GitHub App limited to read access on that one repo, tokens valid 8 hours) or to paste a fine-grained token. The token is never written to disk. Then it asks for the machine profile (suggested from the hostname), for a sparse clone (only what's needed to apply) or a full one (to edit and push), clones to `~/.local/share/chezmoi`, installs a pinned, checksummed chezmoi, and applies.
 
 To check the script before running it, download it from a commit URL, read it, then `sh setup.sh`.
 
