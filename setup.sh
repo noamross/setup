@@ -8,11 +8,11 @@
 #   token      paste a fine-grained PAT (noamross/cheznoam, contents: read)
 # The token stays in this process: never in a URL, .git/config, credential store or history.
 #
-# Then it asks for the machine profile (home/.chezmoidata/profiles.yaml: role and settings such as
-# the CDC VAP's), suggesting one from the hostname, and for a sparse or full clone.
+# Then it asks for the machine profile (home/.chezmoidata/profiles.yaml: role and machine settings),
+# suggesting one from the hostname, and for a sparse or full clone.
 #
 # Env (all optional): CHEZNOAM_AUTH=existing|browser|token, CHEZNOAM_TOKEN, CHEZNOAM_PROFILE,
-# CHEZNOAM_CLONE=sparse|full, plus init settings that override the profile (CHEZNOAM_CONTEXT, ...).
+# CHEZNOAM_CLONE=sparse|full, plus init settings that override the profile (see .chezmoi.toml.tmpl).
 # Without a terminal: the stored or hostname-matched profile, and the profile's clone type.
 # Test overrides: CHEZNOAM_REPO, CHEZNOAM_GITHUB, CHEZNOAM_CLIENT_ID, CHEZNOAM_HOSTNAME.
 set -eu
@@ -40,7 +40,7 @@ need git
 need curl
 
 export GIT_TERMINAL_PROMPT=0
-# git with the token from the environment only; clears any other helper (e.g. a gh login as nmrcdc)
+# git with the token from the environment only; clears any other credential helper (e.g. another GitHub account)
 tgit() { git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$CHEZNOAM_GIT_TOKEN"; }; f' "$@"; }
 mode=${CHEZNOAM_AUTH:-}
 token=
